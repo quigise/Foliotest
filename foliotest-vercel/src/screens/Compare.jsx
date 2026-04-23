@@ -3,8 +3,8 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, ReferenceLine,
 } from "recharts";
-import { Caps, Card, Chip, Signed, Stat, Icon, AssetDot, Button } from "../components/primitives";
-import { C, ASSET_COLORS, INITIAL_VALUE } from "../lib/tokens";
+import { Caps, Card, Chip, Signed, Stat, Button } from "../components/primitives";
+import { C, ASSET_COLORS } from "../lib/tokens";
 import { fmtCurrency, fmtDate } from "../lib/format";
 
 export function Compare({ portfolios, pfNames, pfColors, displayChart, allMetrics, period, busy, onEdit }) {
@@ -62,7 +62,6 @@ export function Compare({ portfolios, pfNames, pfColors, displayChart, allMetric
         gap:16 }}>
         {portfolios.map((pf, i) => {
           const m = allMetrics[i];
-          const total = pf.holdings.reduce((s, h) => s + h.weight, 0);
           return (
             <Card key={pf.id} padding={0}>
               <div style={{ padding:"18px 22px", borderBottom:`1px solid ${C.border}`,

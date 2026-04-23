@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
-import { C, PRESETS, PERIODS, PF_COLORS, INITIAL_VALUE, ROUTES } from "./lib/tokens";
+import { C, PRESETS, PERIODS, PF_COLORS } from "./lib/tokens";
 import { encodeState, decodeState } from "./lib/api";
 import { useBacktest } from "./hooks/useBacktest";
 
@@ -56,7 +56,7 @@ export default function App() {
   const [route, setRoute]             = useState(() => initState?.route || localStorage.getItem("ft:route") || "onboarding");
   const [portfolios, setPortfolios]   = useState(initState?.portfolios || [mkPf(PRESETS[0])]);
   const [period, setPeriod]           = useState(initState?.period || "10Y");
-  const [benchmark, setBenchmark]     = useState(initState?.benchmark || "SPY");
+  const [benchmark]                   = useState(initState?.benchmark || "SPY");
   const [exportOpen, setExportOpen]   = useState(false);
   const [shareOpen, setShareOpen]     = useState(false);
   const [running, setRunning]         = useState(false);
@@ -107,13 +107,6 @@ export default function App() {
     setRunning(true);
     setTimeout(() => { setRunning(false); setRoute("results"); }, 700);
   }, []);
-
-  const addPortfolioForCompare = useCallback(() => {
-    if (portfolios.length >= 4) return;
-    const next = mkPf(PRESETS[portfolios.length % PRESETS.length], portfolios.length);
-    setPortfolios([...portfolios, next]);
-    setRoute("compare");
-  }, [portfolios]);
 
   const copyLink = useCallback(() => {
     navigator.clipboard.writeText(window.location.href).then(() => {

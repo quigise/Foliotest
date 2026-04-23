@@ -1,7 +1,6 @@
 import { useState } from "react";
-import { Caps, Card, Button, Icon, Input } from "../components/primitives";
+import { Caps, Button, Icon, Input } from "../components/primitives";
 import { C } from "../lib/tokens";
-import { fmtCurrency } from "../lib/format";
 import { exportCSV } from "../lib/api";
 
 // ─── Modal shell ─────────────────────────────────────────────────────────────

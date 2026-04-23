@@ -3,11 +3,11 @@ import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   ScatterChart, Scatter, Cell, LabelList,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
-  ResponsiveContainer, ReferenceLine, ZAxis, ReferenceArea,
+  ResponsiveContainer, ReferenceLine, ZAxis,
 } from "recharts";
-import { Caps, Card, Chip, Button, Icon, Stat, Signed, Tooltip as Tip, AssetDot } from "../components/primitives";
+import { Caps, Card, Chip, Button, Icon, Stat, Signed } from "../components/primitives";
 import { C, ASSET_COLORS, MONTHS_SHORT, INITIAL_VALUE } from "../lib/tokens";
-import { fmtCurrency, fmtDate, fmtMonthYear, fmtPct } from "../lib/format";
+import { fmtCurrency, fmtDate, fmtMonthYear } from "../lib/format";
 import { buildAssetChart } from "../lib/compute";
 
 const TABS = [

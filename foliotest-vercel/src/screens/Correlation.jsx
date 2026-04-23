@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Caps, Card, Chip } from "../components/primitives";
 import { C } from "../lib/tokens";
 

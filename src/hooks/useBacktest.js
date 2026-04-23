@@ -72,7 +72,8 @@ export function useBacktest({ portfolios, period, benchmark, pfColors, rollingWi
     setBusy(false);
   }, [recompute]);
 
-  useEffect(() => { load(portfolios, period, priceCache, benchmark); /* eslint-disable-next-line */ }, [period, benchmark]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => { load(portfolios, period, priceCache, benchmark); }, [period, benchmark]);
 
   const prevSig = useRef("");
   useEffect(() => {
