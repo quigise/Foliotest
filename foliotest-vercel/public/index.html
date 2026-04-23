@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Foliotest — Portfolio backtester</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: 'Inter', system-ui, sans-serif; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Re-create Lucide icons when DOM changes
+      if (window.lucide) {
+        const tick = () => window.lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+        const mo = new MutationObserver(tick);
+        mo.observe(document.body, { childList: true, subtree: true });
+        setInterval(tick, 600);
+      }
+    </script>
+  </body>
+</html>
