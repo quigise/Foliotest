@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, Component } from "react";
 import { C } from "../lib/tokens";
 
 // ─── Lucide icon loader ──────────────────────────────────────────────────────
@@ -192,7 +192,7 @@ export function Tooltip({ children, content, side = "top" }) {
 export function Signed({ value, suffix = "%", digits = 2, size = "md", weight = 700 }) {
   const sizes = { sm: 13, md: 14, lg: 18, xl: 28, xxl: 40 };
   if (value == null || !isFinite(value)) {
-    return <span style={{ fontFamily:"var(--tf-font-sans)", fontWeight, color:C.muted, fontSize:sizes[size] || size }}>—</span>;
+    return <span style={{ fontFamily:"var(--tf-font-sans)", fontWeight: weight, color:C.muted, fontSize:sizes[size] || size }}>—</span>;
   }
   const pos = value >= 0;
   const sign = pos ? "+" : "−";
@@ -318,7 +318,6 @@ export function StatusPill({ id, status, errMsg }) {
 }
 
 // ─── Error boundary ──────────────────────────────────────────────────────────
-import { Component } from "react";
 export class ErrorBoundary extends Component {
   constructor(props) { super(props); this.state = { error: null }; }
   static getDerivedStateFromError(error) { return { error }; }

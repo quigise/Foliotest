@@ -1,6 +1,6 @@
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import { Caps, Icon, Chip, Button, Card, Input, Slider, Tooltip, AssetDot, Signed, Stat, Spinner, StatusPill } from "../components/primitives";
-import { C, ASSET_COLORS, ASSET_META, ASSET_GROUPS, REBALANCE, INITIAL_VALUE } from "../lib/tokens";
+import { C, ASSET_COLORS, ASSET_META, REBALANCE, INITIAL_VALUE } from "../lib/tokens";
 import { fmtCurrency } from "../lib/format";
 
 export function Builder({

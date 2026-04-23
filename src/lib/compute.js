@@ -45,7 +45,11 @@ export function simulatePortfolio(aligned, weights, rebalance, monthlyContributi
   ids.forEach(id => { w[id] = (weights[id] ?? 0) / totalW; });
 
   let startIdx = 0;
-  while (startIdx < dates.length && ids.some(id => closes[id][startIdx] == null)) startIdx++;
+  for (; startIdx < dates.length; startIdx++) {
+    let hasNull = false;
+    for (const id of ids) if (closes[id][startIdx] == null) { hasNull = true; break; }
+    if (!hasNull) break;
+  }
   if (startIdx >= dates.length - 1) return [];
 
   let shares = {};
