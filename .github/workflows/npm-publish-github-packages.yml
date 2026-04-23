@@ -1,0 +1,2030 @@
+# Portfolio Backtester
+
+Backtest de portefeuille avec données réelles Yahoo Finance.  
+Architecture identique à testfol.io : **serveur Node.js** qui proxy Yahoo Finance (pas de CORS) + **frontend React**.
+
+## Prérequis
+
+- [Node.js](https://nodejs.org/) v18 ou supérieur
+
+## Installation & lancement (3 commandes)
+
+```bash
+# 1. Installer les dépendances
+cd portfolio-backtester
+npm run setup
+
+# 2. Lancer (serveur + frontend en même temps)
+npm run dev
+```
+
+L'application s'ouvre automatiquement sur **http://localhost:3000**  
+Le serveur API tourne sur **http://localhost:3001**
+
+## Architecture
+
+```
+portfolio-backtester/
+├── server.js          ← Serveur Express : proxy Yahoo Finance + cache 15min
+├── package.json       ← Scripts de démarrage
+└── client/
+    ├── src/
+    │   ├── App.js     ← Interface React (Trade Republic style)
+    │   └── api.js     ← Fetch, alignement des séries, métriques
+    └── public/
+        └── index.html
+```
+
+## Pourquoi ça marche là où le sandbox Claude ne fonctionne pas ?
+
+Le navigateur bloque les appels directs à Yahoo Finance (CORS).  
+Ce serveur Express reçoit les requêtes du frontend et contacte Yahoo Finance  
+**côté serveur**, sans restriction CORS, avec un cache de 15 minutes pour  
+éviter les rate limits.
+
+## Fonctionnalités
+
+- ✅ Données réelles Yahoo Finance (actions, ETFs, crypto, commodités)
+- ✅ Saisie libre de n'importe quel ticker Yahoo (MC.PA, IWDA.AS, etc.)
+- ✅ 10 métriques : CAGR, Sharpe, Sortino, Drawdown max, Beta, Win Rate…
+- ✅ Comparaison vs benchmark (SPY, QQQ, BTC-USD…)
+- ✅ Cache serveur 15 min → backtests instantanés sur tickers déjà chargés
+- ✅ Périodes : 1M, 3M, 6M, 1A, 3A, 5A
+
+## Tickers supportés
+
+Tout ticker valide sur Yahoo Finance :
+- Actions US : `AAPL`, `MSFT`, `TSLA`, `NVDA`…
+- Actions EU : `MC.PA` (LVMH), `AIR.PA` (Airbus), `ASML.AS`…
+- ETFs : `SPY`, `QQQ`, `IWDA.AS`, `CW8.PA`…
+- Crypto : `BTC-USD`, `ETH-USD`, `SOL-USD`…
+- Commodités : `GLD`, `SLV`, `TLT`…
+
+{
+  "name": "portfolio-client",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "recharts": "^2.10.3"
+  },
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build"
+  },
+  "proxy": "http://localhost:3001",
+  "browserslist": {
+    "production": [">0.2%", "not dead", "not op_mini all"],
+    "development": ["last 1 chrome version"]
+  }
+}
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Foliotest — Portfolio backtester</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
+    <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.min.js"></script>
+    <style>
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { font-family: 'Inter', system-ui, sans-serif; background: #fff; }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // Re-create Lucide icons when DOM changes
+      if (window.lucide) {
+        const tick = () => window.lucide.createIcons({ attrs: { 'stroke-width': 1.5 } });
+        const mo = new MutationObserver(tick);
+        mo.observe(document.body, { childList: true, subtree: true });
+        setInterval(tick, 600);
+      }
+    </script>
+  </body>
+</html>
+
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { C, PRESETS, PERIODS, PF_COLORS, INITIAL_VALUE, ROUTES } from "./lib/tokens";
+import { encodeState, decodeState } from "./lib/api";
+import { useBacktest } from "./hooks/useBacktest";
+
+import { TopBar, SideNav } from "./components/chrome";
+import { ErrorBoundary } from "./components/primitives";
+import { ExportModal, ShareModal, RunningScreen } from "./components/Modals";
+
+import { Onboarding } from "./screens/Onboarding";
+import { Builder }    from "./screens/Builder";
+import { Results }    from "./screens/Results";
+import { Compare }    from "./screens/Compare";
+import { Correlation }from "./screens/Correlation";
+
+// ─── Global CSS ──────────────────────────────────────────────────────────────
+const GLOBAL_CSS = `
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap');
+  :root { --tf-font-sans: 'Inter', system-ui, -apple-system, sans-serif; }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body, #root { background: #fff; min-height: 100vh; }
+  body { font-family: var(--tf-font-sans); color: ${C.text}; -webkit-font-smoothing: antialiased; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: ${C.border}; border-radius: 999px; }
+  ::-webkit-scrollbar-thumb:hover { background: ${C.borderMd}; }
+  input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
+  button { font-family: var(--tf-font-sans); }
+  table { border-collapse: collapse; }
+  @keyframes tf-spin    { to { transform: rotate(360deg); } }
+  @keyframes tf-fadein  { from { opacity:0; } to { opacity:1; } }
+  @keyframes tf-modalin { from { opacity:0; transform:translateY(8px) scale(0.98); } to { opacity:1; transform:none; } }
+  @keyframes tf-fadeup  { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:none; } }
+  .anim-fadeup { animation: tf-fadeup 0.35s ease both; }
+`;
+
+// ─── Default portfolio factory ───────────────────────────────────────────────
+const mkPf = (preset, idx = 0) => ({
+  id:           Date.now() + idx,
+  name:         preset?.name || `Portfolio ${idx + 1}`,
+  rebalance:    preset?.rebalance || "Quarterly",
+  contribution: 0,
+  holdings:     preset?.holdings || [{ sym:"VTI", weight:60 }, { sym:"BND", weight:40 }],
+});
+
+export default function App() {
+  // ─── State ─────────────────────────────────────────────────────────────────
+  const initState = useMemo(() => {
+    try {
+      const h = window.location.hash.slice(1);
+      if (h) { const s = decodeState(h); if (s) return s; }
+    } catch {}
+    return null;
+  }, []);
+
+  const [route, setRoute]             = useState(() => initState?.route || localStorage.getItem("ft:route") || "onboarding");
+  const [portfolios, setPortfolios]   = useState(initState?.portfolios || [mkPf(PRESETS[0])]);
+  const [period, setPeriod]           = useState(initState?.period || "10Y");
+  const [benchmark, setBenchmark]     = useState(initState?.benchmark || "SPY");
+  const [exportOpen, setExportOpen]   = useState(false);
+  const [shareOpen, setShareOpen]     = useState(false);
+  const [running, setRunning]         = useState(false);
+  const [corrPfIdx, setCorrPfIdx]     = useState(0);
+  const [activePfIdx, setActivePfIdx] = useState(0);
+  const [toast, setToast]             = useState(null);
+
+  // Persist route
+  useEffect(() => { localStorage.setItem("ft:route", route); }, [route]);
+
+  // Sync URL + title
+  useEffect(() => {
+    const hash = encodeState({ route, portfolios, period, benchmark });
+    window.history.replaceState(null, "", `#${hash}`);
+    document.title = portfolios.length > 0
+      ? `${portfolios.map(p => p.name).join(" · ")} — Foliotest`
+      : "Foliotest — Portfolio backtester";
+  }, [route, portfolios, period, benchmark]);
+
+  // Color assignment
+  const pfColors = useMemo(() => portfolios.map((_, i) => PF_COLORS[i % PF_COLORS.length]), [portfolios]);
+  const pfNames  = useMemo(() => portfolios.map(p => p.name), [portfolios]);
+
+  // Backtest hook (handles all data fetching & computation)
+  const backtest = useBacktest({
+    portfolios, period, benchmark, pfColors,
+    rollingWin: 1, corrPfIdx,
+  });
+
+  // ─── Handlers ──────────────────────────────────────────────────────────────
+  const pickPreset = useCallback((preset) => {
+    setPortfolios([mkPf(preset)]);
+    setActivePfIdx(0);
+    setRoute("builder");
+  }, []);
+
+  const blank = useCallback(() => {
+    setPortfolios([mkPf(null)]);
+    setActivePfIdx(0);
+    setRoute("builder");
+  }, []);
+
+  const updateActivePortfolio = useCallback((updated) => {
+    setPortfolios(ps => ps.map((p, i) => i === activePfIdx ? updated : p));
+  }, [activePfIdx]);
+
+  const runBacktestFlow = useCallback(() => {
+    setRunning(true);
+    setTimeout(() => { setRunning(false); setRoute("results"); }, 700);
+  }, []);
+
+  const addPortfolioForCompare = useCallback(() => {
+    if (portfolios.length >= 4) return;
+    const next = mkPf(PRESETS[portfolios.length % PRESETS.length], portfolios.length);
+    setPortfolios([...portfolios, next]);
+    setRoute("compare");
+  }, [portfolios]);
+
+  const copyLink = useCallback(() => {
+    navigator.clipboard.writeText(window.location.href).then(() => {
+      setToast("Link copied to clipboard");
+      setTimeout(() => setToast(null), 2500);
+    }).catch(() => {});
+  }, []);
+
+  // Keyboard shortcuts
+  useEffect(() => {
+    const onKey = (e) => {
+      if (["INPUT","SELECT","TEXTAREA"].includes(e.target.tagName)) return;
+      if ((e.metaKey || e.ctrlKey) && e.key === "s") { e.preventDefault(); copyLink(); return; }
+      const periodMap = { "1":"1M","2":"3M","3":"6M","4":"1Y","5":"3Y","6":"5Y","7":"10Y","8":"Max" };
+      if (periodMap[e.key]) setPeriod(periodMap[e.key]);
+      const routeMap = { "n":"onboarding","b":"builder","r":"results","c":"compare","x":"correlation" };
+      if (routeMap[e.key.toLowerCase()]) setRoute(routeMap[e.key.toLowerCase()]);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [copyLink]);
+
+  // Saved portfolios for sidebar
+  const savedPortfolios = useMemo(() => portfolios.map((pf, i) => ({
+    id:    pf.id,
+    name:  pf.name,
+    color: pfColors[i],
+    ret:   backtest.allMetrics[i] ? parseFloat(backtest.allMetrics[i].totalReturn) : null,
+    pfIdx: i,
+  })), [portfolios, pfColors, backtest.allMetrics]);
+
+  const onSelectSaved = useCallback((s) => {
+    setActivePfIdx(s.pfIdx);
+    setRoute("builder");
+  }, []);
+
+  const activePortfolio = portfolios[activePfIdx] || portfolios[0];
+
+  return (
+    <div style={{ display:"flex", flexDirection:"column", minHeight:"100vh", background:"#fff" }}>
+      <style>{GLOBAL_CSS}</style>
+
+      <TopBar
+        onOpenExport={() => setExportOpen(true)}
+        onOpenShare={() => setShareOpen(true)}
+        busy={backtest.busy}
+        loadCount={backtest.loadCount}
+        latestDate={backtest.latestDate}
+      />
+
+      <div style={{ display:"flex", flex:1, minHeight:0 }}>
+        <SideNav
+          route={route}
+          onNav={setRoute}
+          savedPortfolios={savedPortfolios}
+          onSelectSaved={onSelectSaved}
+        />
+
+        <main style={{ flex:1, overflowY:"auto", maxHeight:"calc(100vh - 64px)", background:"#fff" }}>
+          <ErrorBoundary>
+            {route === "onboarding" && (
+              <Onboarding onPickPreset={pickPreset} onBlank={blank}/>
+            )}
+
+            {route === "builder" && activePortfolio && (
+              <Builder
+                portfolio={activePortfolio}
+                onUpdate={updateActivePortfolio}
+                metrics={backtest.allMetrics[activePfIdx]}
+                busy={backtest.busy}
+                statuses={backtest.statuses}
+                statusMsgs={backtest.statusMsgs}
+                tickerPerfs={backtest.tickerPerfs}
+                onRun={runBacktestFlow}
+              />
+            )}
+
+            {route === "results" && (
+              <Results
+                portfolios={portfolios}
+                pfNames={pfNames}
+                pfColors={pfColors}
+                displayChart={backtest.displayChart}
+                drawdownChart={backtest.drawdownChart}
+                annualRet={backtest.annualRet}
+                rollingRet={backtest.rollingRet}
+                heatmapData={backtest.heatmapData}
+                distData={backtest.distData}
+                scatterData={backtest.scatterData}
+                ddAnalysis={backtest.ddAnalysis}
+                allMetrics={backtest.allMetrics}
+                simResults={backtest.simResults}
+                priceCache={backtest.priceCache}
+                benchSim={backtest.benchSim}
+                benchmark={benchmark}
+                period={period}
+                setPeriod={setPeriod}
+                periods={PERIODS}
+                busy={backtest.busy}
+                onEdit={() => setRoute("builder")}
+              />
+            )}
+
+            {route === "compare" && (
+              <Compare
+                portfolios={portfolios}
+                pfNames={pfNames}
+                pfColors={pfColors}
+                displayChart={backtest.displayChart}
+                allMetrics={backtest.allMetrics}
+                period={period}
+                busy={backtest.busy}
+                onEdit={() => setRoute("builder")}
+              />
+            )}
+
+            {route === "correlation" && (
+              <Correlation
+                portfolios={portfolios}
+                pfColors={pfColors}
+                corrMatrix={backtest.corrMatrix}
+                corrPfIdx={corrPfIdx}
+                setCorrPfIdx={setCorrPfIdx}
+              />
+            )}
+          </ErrorBoundary>
+        </main>
+      </div>
+
+      {/* Modals */}
+      {running && <RunningScreen portfolioName={activePortfolio?.name || "portfolio"}/>}
+      {exportOpen && (
+        <ExportModal onClose={() => setExportOpen(false)}
+          displayChart={backtest.displayChart}
+          simResults={backtest.simResults}
+          portfolios={portfolios}
+          pfNames={pfNames}
+          period={period}/>
+      )}
+      {shareOpen && <ShareModal onClose={() => setShareOpen(false)}/>}
+
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position:"fixed", bottom:24, left:"50%", transform:"translateX(-50%)",
+          padding:"10px 18px", borderRadius:10, background:C.text, color:"#fff",
+          fontFamily:"var(--tf-font-sans)", fontSize:13, fontWeight:600,
+          boxShadow:"0 10px 30px rgba(0,0,0,0.2)", zIndex:60,
+          animation:"tf-fadeup 0.25s ease both",
+        }}>
+          {toast}
+        </div>
+      )}
+    </div>
+  );
+}
+
+import { useState } from "react";
+import { Caps, Card, Button, Icon, Input } from "../components/primitives";
+import { C } from "../lib/tokens";
+import { fmtCurrency } from "../lib/format";
+import { exportCSV } from "../lib/api";
+
+// ─── Modal shell ─────────────────────────────────────────────────────────────
+function Modal({ children, onClose, title, subtitle, width = 560 }) {
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position:"fixed", inset:0, zIndex:50,
+        background:"rgba(10,10,10,.45)", backdropFilter:"blur(4px)",
+        display:"flex", alignItems:"center", justifyContent:"center",
+        animation:"tf-fadein 0.2s ease",
+      }}>
+      <div onClick={e => e.stopPropagation()}
+        style={{
+          background:"#fff", borderRadius:16, width, maxWidth:"calc(100vw - 40px)",
+          maxHeight:"calc(100vh - 80px)", overflow:"auto",
+          boxShadow:"0 20px 60px rgba(10,10,10,0.25)",
+          animation:"tf-modalin 0.25s ease both",
+        }}>
+        <div style={{ padding:"22px 26px 16px", borderBottom:`1px solid ${C.border}`,
+          display:"flex", alignItems:"flex-start", justifyContent:"space-between", gap:16 }}>
+          <div>
+            <h2 style={{ margin:0, fontFamily:"var(--tf-font-sans)", fontWeight:700,
+              fontSize:18, letterSpacing:"-0.015em", color:C.text }}>
+              {title}
+            </h2>
+            {subtitle && (
+              <p style={{ margin:"4px 0 0", fontFamily:"var(--tf-font-sans)",
+                fontSize:13, color:C.muted, lineHeight:1.5 }}>
+                {subtitle}
+              </p>
+            )}
+          </div>
+          <button onClick={onClose}
+            style={{ background:"transparent", border:0, cursor:"pointer",
+              color:C.muted, padding:6, borderRadius:6, display:"inline-flex" }}
+            onMouseEnter={e => e.currentTarget.style.background = C.bgHover}
+            onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+            <Icon name="x" size={18}/>
+          </button>
+        </div>
+        <div style={{ padding:"22px 26px" }}>
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Export Modal ────────────────────────────────────────────────────────────
+export function ExportModal({ onClose, displayChart, simResults, portfolios, pfNames, period }) {
+  const [format, setFormat] = useState("csv");
+
+  const handleExport = () => {
+    if (format === "csv") {
+      exportCSV(displayChart, simResults, portfolios, pfNames, `foliotest_${period}.csv`);
+    } else if (format === "json") {
+      const blob = new Blob([JSON.stringify({ portfolios, period, results: simResults }, null, 2)],
+        { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      Object.assign(document.createElement("a"), { href:url, download:`foliotest_${period}.json` }).click();
+      URL.revokeObjectURL(url);
+    } else if (format === "png") {
+      window.print();
+    }
+    onClose();
+  };
+
+  const formats = [
+    { id:"csv",  label:"CSV",  desc:"Spreadsheet-ready, includes per-period values in $",  icon:"file-text" },
+    { id:"json", label:"JSON", desc:"Full data structure for programmatic use",            icon:"code" },
+    { id:"png",  label:"Print", desc:"Open browser print dialog (save as PDF or print)",   icon:"printer" },
+  ];
+
+  return (
+    <Modal onClose={onClose} title="Export results" subtitle="Choose how you want to save your backtest data.">
+      <div style={{ display:"flex", flexDirection:"column", gap:8, marginBottom:20 }}>
+        {formats.map(f => (
+          <button key={f.id} onClick={() => setFormat(f.id)}
+            style={{
+              display:"flex", alignItems:"center", gap:14,
+              padding:"14px 16px", border:`1px solid ${format === f.id ? C.text : C.border}`,
+              background: format === f.id ? C.bgAlt : "#fff",
+              borderRadius:10, cursor:"pointer", textAlign:"left",
+              transition:"all 120ms",
+            }}>
+            <div style={{
+              width:38, height:38, borderRadius:8,
+              background: format === f.id ? C.text : C.bgHover,
+              color: format === f.id ? "#fff" : C.muted,
+              display:"flex", alignItems:"center", justifyContent:"center", flexShrink:0,
+            }}>
+              <Icon name={f.icon} size={18}/>
+            </div>
+            <div style={{ flex:1 }}>
+              <div style={{ fontFamily:"var(--tf-font-sans)", fontWeight:700,
+                fontSize:14, color:C.text }}>{f.label}</div>
+              <div style={{ fontFamily:"var(--tf-font-sans)", fontSize:12,
+                color:C.muted, marginTop:2 }}>{f.desc}</div>
+            </div>
+            {format === f.id && <Icon name="check" size={16} color={C.text}/>}
+          </button>
+        ))}
+      </div>
+      <div style={{ display:"flex", gap:8, justifyContent:"flex-end" }}>
+        <Button kind="ghost" onClick={onClose}>Cancel</Button>
+        <Button kind="primary" icon="download" onClick={handleExport}>
+          Download {format.toUpperCase()}
+        </Button>
+      </div>
+    </Modal>
+  );
+}
+
+// ─── Share Modal ─────────────────────────────────────────────────────────────
+export function ShareModal({ onClose }) {
+  const [copied, setCopied] = useState(false);
+  const url = window.location.href;
+
+  const copy = () => {
+    navigator.clipboard.writeText(url).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  };
+
+  return (
+    <Modal onClose={onClose} title="Share this backtest"
+      subtitle="The link contains your full configuration — anyone with it can see the same results.">
+      <div style={{ display:"flex", gap:8, marginBottom:20 }}>
+        <div style={{ flex:1 }}>
+          <Input value={url} onChange={() => {}}/>
+        </div>
+        <Button kind={copied ? "pos" : "primary"} icon={copied ? "check" : "copy"} onClick={copy}>
+          {copied ? "Copied" : "Copy"}
+        </Button>
+      </div>
+      <div style={{ padding:"14px 16px", background:C.bgAlt, borderRadius:10,
+        fontFamily:"var(--tf-font-sans)", fontSize:12, color:C.muted, lineHeight:1.6 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:6, marginBottom:6 }}>
+          <Icon name="info" size={13} color={C.muted}/>
+          <Caps>How it works</Caps>
+        </div>
+        Your portfolios, period, and benchmark are encoded in the URL.
+        Recipients see the same view but can edit it independently.
+      </div>
+    </Modal>
+  );
+}
+
+// ─── Running screen ──────────────────────────────────────────────────────────
+export function RunningScreen({ portfolioName, message }) {
+  return (
+    <div style={{
+      position:"fixed", inset:0, background:"rgba(255,255,255,0.94)",
+      backdropFilter:"blur(4px)", zIndex:40,
+      display:"flex", alignItems:"center", justifyContent:"center",
+      animation:"tf-fadein 0.2s ease",
+    }}>
+      <div style={{ textAlign:"center", maxWidth:380 }}>
+        <div style={{
+          width:56, height:56, margin:"0 auto 20px",
+          border:`3px solid ${C.border}`, borderTopColor:C.text,
+          borderRadius:999, animation:"tf-spin 0.8s linear infinite",
+        }}/>
+        <h2 style={{ margin:0, fontFamily:"var(--tf-font-sans)", fontWeight:700,
+          fontSize:20, letterSpacing:"-0.015em", color:C.text }}>
+          Running backtest
+        </h2>
+        <p style={{ margin:"6px 0 0", fontFamily:"var(--tf-font-sans)", fontSize:14, color:C.muted }}>
+          {message || `Simulating ${portfolioName} with real Yahoo Finance data…`}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+import { useState } from "react";
+import { Icon, Button, Caps, Spinner, ProgressBar } from "./primitives";
+import { C, ROUTES } from "../lib/tokens";
+
+// ─── TopBar ──────────────────────────────────────────────────────────────────
+export function TopBar({ onOpenExport, onOpenShare, busy, loadCount, latestDate }) {
+  return (
+    <div style={{
+      position: "sticky", top: 0, zIndex: 20, height: 64, background: "#fff",
+      borderBottom: `1px solid ${C.border}`, display: "flex", alignItems: "center",
+      padding: "0 24px", gap: 20, flexShrink: 0,
+    }}>
+      {/* Brand */}
+      <div style={{ display:"flex", alignItems:"center", gap:10, width:216 }}>
+        <div style={{ width:30, height:30, background:C.text, borderRadius:8,
+          display:"flex", alignItems:"center", justifyContent:"center" }}>
+          <span style={{ color:"#fff", fontFamily:"var(--tf-font-sans)",
+            fontWeight:800, fontSize:14 }}>F</span>
+        </div>
+        <span style={{ fontFamily:"var(--tf-font-sans)", fontWeight:800, fontSize:19, letterSpacing:"-0.02em" }}>
+          Foliotest
+        </span>
+      </div>
+
+      {/* Search bar */}
+      <div style={{ flex:1, maxWidth:420, position:"relative" }}>
+        <div style={{ position:"absolute", left:12, top:"50%", transform:"translateY(-50%)",
+          color:C.faint, display:"flex" }}>
+          <Icon name="search" size={15} color={C.faint}/>
+        </div>
+        <input placeholder="Search tickers — SPY, QQQ, BTC-USD…"
+          style={{ width:"100%", padding:"9px 12px 9px 36px",
+            border:`1px solid ${C.border}`, background:C.bgAlt, borderRadius:8,
+            fontFamily:"var(--tf-font-sans)", fontSize:14, outline:"none",
+            boxSizing:"border-box" }}/>
+      </div>
+
+      {/* Status (loading or last-data-date) */}
+      {busy && loadCount.total > 0 ? (
+        <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+          <Spinner size={12}/>
+          <div style={{ width:100 }}>
+            <ProgressBar value={loadCount.done} max={loadCount.total}/>
+          </div>
+          <span style={{ fontSize:11, color:C.muted, fontWeight:500, fontFamily:"var(--tf-font-sans)", whiteSpace:"nowrap" }}>
+            {loadCount.done}/{loadCount.total}
+          </span>
+        </div>
+      ) : latestDate ? (
+        <div style={{ fontSize:11, color:C.muted, fontFamily:"var(--tf-font-sans)" }}>
+          Data through {new Date(latestDate + "T00:00:00Z").toLocaleDateString("en-US", {
+            month:"short", day:"numeric", year:"numeric", timeZone:"UTC"
+          })}
+        </div>
+      ) : null}
+
+      <div style={{ flex:1 }}/>
+
+      <Button kind="ghost" size="sm" icon="share-2" onClick={onOpenShare}>Share</Button>
+      <Button kind="secondary" size="sm" icon="download" onClick={onOpenExport}>Export</Button>
+
+      <div style={{ width:1, height:24, background:C.border }}/>
+
+      <button style={{ background:"transparent", border:0, width:36, height:36,
+        borderRadius:8, cursor:"pointer", display:"inline-flex",
+        alignItems:"center", justifyContent:"center" }}>
+        <Icon name="bell" size={18}/>
+      </button>
+
+      <div style={{ width:32, height:32, borderRadius:999, background:C.text,
+        color:"#fff", display:"flex", alignItems:"center", justifyContent:"center",
+        fontFamily:"var(--tf-font-sans)", fontWeight:700, fontSize:12 }}>
+        FT
+      </div>
+    </div>
+  );
+}
+
+// ─── SideNav ─────────────────────────────────────────────────────────────────
+export function SideNav({ route, onNav, savedPortfolios, onSelectSaved }) {
+  const [hover, setHover] = useState(null);
+
+  return (
+    <aside style={{
+      width:236, borderRight:`1px solid ${C.border}`, background:"#fff",
+      padding:"20px 12px", display:"flex", flexDirection:"column", gap:24,
+      flexShrink:0, height:"calc(100vh - 64px)", overflowY:"auto",
+    }}>
+      {/* Workbench section */}
+      <div>
+        <Caps style={{ padding:"0 12px", marginBottom:8 }}>Workbench</Caps>
+        <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+          {ROUTES.map(it => {
+            const active = route === it.id;
+            const isHover = hover === it.id;
+            return (
+              <button key={it.id} onClick={() => onNav(it.id)}
+                onMouseEnter={() => setHover(it.id)} onMouseLeave={() => setHover(null)}
+                style={{
+                  display:"flex", alignItems:"center", gap:10, padding:"8px 12px",
+                  border:0, borderRadius:8,
+                  background: active ? C.bgHover : isHover ? C.bgAlt : "transparent",
+                  color: C.text, fontFamily:"var(--tf-font-sans)", fontSize:14,
+                  fontWeight: active ? 600 : 500, cursor:"pointer", textAlign:"left",
+                  transition:"background 120ms",
+                }}>
+                <Icon name={it.icon} size={17}/>
+                {it.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Saved portfolios */}
+      {savedPortfolios?.length > 0 && (
+        <div>
+          <Caps style={{ padding:"0 12px", marginBottom:8 }}>Open portfolios</Caps>
+          <div style={{ display:"flex", flexDirection:"column", gap:2 }}>
+            {savedPortfolios.map(s => (
+              <button key={s.id} onClick={() => onSelectSaved && onSelectSaved(s)}
+                style={{
+                  display:"flex", alignItems:"center", gap:10, padding:"8px 12px",
+                  border:0, borderRadius:8, background:"transparent", color:C.text2,
+                  fontFamily:"var(--tf-font-sans)", fontSize:13, fontWeight:500,
+                  cursor:"pointer", textAlign:"left",
+                }}
+                onMouseEnter={e => e.currentTarget.style.background = C.bgAlt}
+                onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                <span style={{ width:6, height:6, borderRadius:999, background:s.color || C.borderMd }}/>
+                <span style={{ flex:1, overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                  {s.name}
+                </span>
+                {s.ret != null && (
+                  <span style={{ fontVariantNumeric:"tabular-nums", fontSize:12,
+                    color: s.ret >= 0 ? C.green : C.red, fontWeight:600 }}>
+                    {s.ret >= 0 ? "+" : "−"}{Math.abs(s.ret).toFixed(1)}%
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div style={{ flex:1 }}/>
+
+      {/* Disclaimer card */}
+      <div style={{ padding:12, border:`1px solid ${C.border}`, borderRadius:10, background:C.bgAlt }}>
+        <div style={{ display:"flex", alignItems:"center", gap:8, marginBottom:4 }}>
+          <Icon name="info" size={14} color={C.muted}/>
+          <Caps>Research only</Caps>
+        </div>
+        <div style={{ fontFamily:"var(--tf-font-sans)", fontSize:12, color:C.muted, lineHeight:1.5 }}>
+          Past performance doesn't predict future returns. Data via Yahoo Finance.
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+import { useState, useEffect, useRef } from "react";
+import { C } from "../lib/tokens";
+
+// ─── Lucide icon loader ──────────────────────────────────────────────────────
+// We use lucide-react via CDN script tag in index.html, accessed via window.lucide
+export function Icon({ name, size = 16, color, style }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (ref.current && window.lucide) {
+      ref.current.setAttribute("data-lucide", name);
+      ref.current.innerHTML = "";
+      window.lucide.createIcons({
+        attrs: { width: size, height: size, "stroke-width": 1.5 },
+        nameAttr: "data-lucide",
+      });
+    }
+  }, [name, size]);
+  return <i ref={ref} data-lucide={name}
+    style={{ width: size, height: size, display: "inline-flex",
+      color: color || "currentColor", flexShrink: 0, ...style }} />;
+}
+
+// ─── Button ──────────────────────────────────────────────────────────────────
+export function Button({ kind = "primary", size = "md", children, onClick, disabled, icon, iconRight, style, type = "button" }) {
+  const [hover, setHover] = useState(false);
+  const base = {
+    fontFamily: "var(--tf-font-sans)", fontWeight: 600, border: 0,
+    cursor: disabled ? "not-allowed" : "pointer", opacity: disabled ? 0.4 : 1,
+    borderRadius: 10, display: "inline-flex", alignItems: "center", gap: 8,
+    transition: "background 120ms, border-color 120ms", whiteSpace: "nowrap",
+  };
+  const sizes = {
+    sm: { padding: "7px 12px", fontSize: 13 },
+    md: { padding: "10px 16px", fontSize: 14 },
+    lg: { padding: "12px 22px", fontSize: 15 },
+  };
+  const kinds = {
+    primary:   { background: hover ? "#000" : C.text, color: "#fff" },
+    secondary: { background: hover ? C.bgAlt : "#fff", color: C.text, border: `1px solid ${hover ? C.borderMd : C.borderHv}` },
+    ghost:     { background: hover ? C.bgHover : "transparent", color: C.text },
+    pos:       { background: hover ? C.greenDk : C.green, color: "#fff" },
+    danger:    { background: hover ? C.redDk : C.red, color: "#fff" },
+  };
+  return (
+    <button type={type} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{ ...base, ...sizes[size], ...kinds[kind], ...style }}
+      onClick={onClick} disabled={disabled}>
+      {icon && <Icon name={icon} size={size === "sm" ? 14 : 16}/>}
+      {children}
+      {iconRight && <Icon name={iconRight} size={size === "sm" ? 14 : 16}/>}
+    </button>
+  );
+}
+
+// ─── Chip ────────────────────────────────────────────────────────────────────
+export function Chip({ children, tone = "neutral", active, onClick, size = "md", style }) {
+  const tones = {
+    neutral: { background: active ? C.text : "#fff", color: active ? "#fff" : C.text, border: `1px solid ${active ? C.text : C.borderHv}` },
+    pos:     { background: C.greenLt, color: C.greenDk, border: `1px solid ${C.greenBd}` },
+    neg:     { background: C.redLt, color: C.redDk, border: `1px solid ${C.redBd}` },
+    flat:    { background: C.bgHover, color: C.sub, border: `1px solid ${C.border}` },
+    accent:  { background: C.indigoLt, color: C.indigo2, border: `1px solid ${C.indigoBd}` },
+  };
+  const pad = size === "sm" ? "4px 10px" : "6px 12px";
+  const fs  = size === "sm" ? 12 : 13;
+  return (
+    <span onClick={onClick}
+      style={{ display:"inline-flex", alignItems:"center", gap:6, padding:pad,
+        fontFamily:"var(--tf-font-sans)", fontWeight:600, fontSize:fs, lineHeight:1,
+        borderRadius:999, fontVariantNumeric:"tabular-nums",
+        cursor: onClick ? "pointer" : "default", ...tones[tone], ...style }}>
+      {children}
+    </span>
+  );
+}
+
+// ─── Card ────────────────────────────────────────────────────────────────────
+export function Card({ children, style, onClick, hoverable, padding = 24 }) {
+  const [hover, setHover] = useState(false);
+  return (
+    <div onClick={onClick} onMouseEnter={() => setHover(true)} onMouseLeave={() => setHover(false)}
+      style={{
+        background: "#fff", border: "1px solid #EDEDED", borderRadius: 14, padding,
+        boxShadow: hoverable && hover ? "0 1px 2px rgba(10,10,10,0.04)" : "none",
+        transition: "box-shadow 120ms, border-color 120ms",
+        cursor: onClick ? "pointer" : "default",
+        borderColor: hoverable && hover ? C.borderHv : C.border,
+        ...style,
+      }}>{children}</div>
+  );
+}
+
+// ─── Caps (label) ────────────────────────────────────────────────────────────
+export function Caps({ children, style, color }) {
+  return <div style={{
+    fontFamily: "var(--tf-font-sans)", fontWeight: 600, fontSize: 11,
+    letterSpacing: "0.08em", textTransform: "uppercase",
+    color: color || C.muted, ...style,
+  }}>{children}</div>;
+}
+
+// ─── Input ───────────────────────────────────────────────────────────────────
+export function Input({ prefix, suffix, value, onChange, placeholder, type = "text", style, autoFocus, onKeyDown, onBlur }) {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", border: `1px solid ${C.borderHv}`,
+      borderRadius: 6, overflow: "hidden", background: "#fff", ...style,
+    }}>
+      {prefix && (
+        <span style={{ padding:"10px 12px", background:C.bgAlt, borderRight:`1px solid ${C.borderHv}`,
+          fontFamily:"var(--tf-font-sans)", fontSize:13, color:C.muted, fontWeight:600 }}>
+          {prefix}
+        </span>
+      )}
+      <input
+        autoFocus={autoFocus}
+        type={type}
+        value={value}
+        onChange={e => onChange && onChange(e.target.value)}
+        onKeyDown={onKeyDown}
+        onBlur={onBlur}
+        placeholder={placeholder}
+        style={{
+          border: 0, padding: "10px 12px", flex: 1,
+          fontFamily: "var(--tf-font-sans)", fontSize: 14, fontWeight: 500,
+          fontVariantNumeric: "tabular-nums", outline: "none", minWidth: 0,
+          background: "transparent", color: C.text,
+        }}
+      />
+      {suffix && (
+        <span style={{ padding:"10px 12px", background:C.bgAlt, borderLeft:`1px solid ${C.borderHv}`,
+          fontFamily:"var(--tf-font-sans)", fontSize:13, color:C.muted, fontWeight:600 }}>
+          {suffix}
+        </span>
+      )}
+    </div>
+  );
+}
+
+// ─── Segmented control ───────────────────────────────────────────────────────
+export function Segmented({ options, value, onChange, size = "md" }) {
+  const pad = size === "sm" ? "6px 10px" : "8px 14px";
+  const fs  = size === "sm" ? 12 : 13;
+  return (
+    <div style={{ display:"inline-flex", border:`1px solid ${C.borderHv}`, borderRadius:8, overflow:"hidden", background:"#fff" }}>
+      {options.map((o, i) => {
+        const v = typeof o === "string" ? o : o.value;
+        const label = typeof o === "string" ? o : o.label;
+        const active = v === value;
+        return (
+          <button key={v} onClick={() => onChange(v)}
+            style={{
+              border: 0, background: active ? C.text : "transparent",
+              color: active ? "#fff" : C.text2, padding: pad,
+              fontFamily: "var(--tf-font-sans)", fontWeight: 600, fontSize: fs,
+              cursor: "pointer", borderRight: i < options.length - 1 ? `1px solid ${C.borderHv}` : 0,
+              transition: "background 120ms",
+            }}>
+            {label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ─── Tooltip ─────────────────────────────────────────────────────────────────
+export function Tooltip({ children, content, side = "top" }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <span style={{ position:"relative", display:"inline-flex" }}
+      onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
+      {children}
+      {open && (
+        <span style={{
+          position: "absolute",
+          [side === "top" ? "bottom" : "top"]: "calc(100% + 8px)",
+          left: "50%", transform: "translateX(-50%)",
+          background: C.text, color: "#fff",
+          padding: "8px 12px", borderRadius: 8,
+          fontFamily: "var(--tf-font-sans)", fontSize: 12, fontWeight: 500,
+          lineHeight: 1.4, whiteSpace: "normal", width: 220, zIndex: 50,
+          pointerEvents: "none", boxShadow: "0 4px 16px rgba(10,10,10,0.12)",
+          textAlign: "left",
+        }}>{content}</span>
+      )}
+    </span>
+  );
+}
+
+// ─── Signed number ───────────────────────────────────────────────────────────
+export function Signed({ value, suffix = "%", digits = 2, size = "md", weight = 700 }) {
+  const sizes = { sm: 13, md: 14, lg: 18, xl: 28, xxl: 40 };
+  if (value == null || !isFinite(value)) {
+    return <span style={{ fontFamily:"var(--tf-font-sans)", fontWeight, color:C.muted, fontSize:sizes[size] || size }}>—</span>;
+  }
+  const pos = value >= 0;
+  const sign = pos ? "+" : "−";
+  const n = Math.abs(value).toFixed(digits);
+  return (
+    <span style={{
+      fontFamily: "var(--tf-font-sans)", fontWeight: weight,
+      color: pos ? C.green : C.red,
+      fontSize: sizes[size] || size, fontVariantNumeric: "tabular-nums",
+      letterSpacing: (sizes[size] || size) >= 24 ? "-0.02em" : 0,
+    }}>{sign}{n}{suffix}</span>
+  );
+}
+
+// ─── Slider with colored fill track ──────────────────────────────────────────
+export function Slider({ value, min = 0, max = 100, step = 0.5, onChange, color = C.text }) {
+  return (
+    <div style={{ position:"relative", width:"100%", height:20, display:"flex", alignItems:"center" }}>
+      <div style={{ position:"absolute", left:0, right:0, height:4, background:C.border, borderRadius:999 }}/>
+      <div style={{
+        position: "absolute", left: 0,
+        width: `${((value - min) / (max - min)) * 100}%`,
+        height: 4, background: color, borderRadius: 999,
+        transition: "width 120ms",
+      }}/>
+      <input type="range" min={min} max={max} step={step} value={value}
+        onChange={e => onChange(parseFloat(e.target.value))}
+        style={{ position:"absolute", inset:0, width:"100%", margin:0,
+          opacity:0, cursor:"pointer", appearance:"none" }}
+      />
+      <div style={{
+        position: "absolute",
+        left: `calc(${((value - min) / (max - min)) * 100}% - 9px)`,
+        width: 18, height: 18, borderRadius: 999, background: "#fff",
+        border: `2px solid ${color}`, pointerEvents: "none",
+        transition: "left 120ms",
+      }}/>
+    </div>
+  );
+}
+
+// ─── Asset dot ───────────────────────────────────────────────────────────────
+export function AssetDot({ sym, size = 28, color }) {
+  const bg = color || C.muted;
+  const display = sym && sym.includes("-") ? sym.split("-")[0].slice(0, 3) : sym?.slice(0, sym.length > 3 ? 2 : 1) || "?";
+  return (
+    <div style={{
+      width: size, height: size, borderRadius: 999, background: bg, color: "#fff",
+      display: "flex", alignItems: "center", justifyContent: "center",
+      fontFamily: "var(--tf-font-sans)", fontWeight: 700,
+      fontSize: size * (display.length > 2 ? 0.32 : 0.4),
+      flexShrink: 0, letterSpacing: "-0.02em",
+    }}>{display}</div>
+  );
+}
+
+// ─── Spinner ─────────────────────────────────────────────────────────────────
+export function Spinner({ size = 14, color = C.text }) {
+  return <div style={{
+    width: size, height: size, border: `2px solid ${C.border}`,
+    borderTop: `2px solid ${color}`, borderRadius: "50%",
+    animation: "tf-spin 0.7s linear infinite", flexShrink: 0,
+  }}/>;
+}
+
+// ─── Stat (small metric block) ───────────────────────────────────────────────
+export function Stat({ label, value, tip, tone, size = "lg" }) {
+  return (
+    <div>
+      <div style={{ display:"flex", alignItems:"center", gap:4, marginBottom:4 }}>
+        <Caps>{label}</Caps>
+        {tip && <Tooltip content={tip}><Icon name="help-circle" size={12} color={C.faint}/></Tooltip>}
+      </div>
+      <div style={{
+        fontFamily: "var(--tf-font-sans)", fontWeight: 700,
+        fontSize: size === "lg" ? 20 : size === "xl" ? 28 : 16,
+        fontVariantNumeric: "tabular-nums",
+        color: tone === "neg" ? C.red : tone === "pos" ? C.green : C.text,
+        letterSpacing: "-0.015em",
+      }}>{value}</div>
+    </div>
+  );
+}
+
+// ─── Progress bar ────────────────────────────────────────────────────────────
+export function ProgressBar({ value = 0, max = 100, color = C.indigo }) {
+  const pct = Math.max(0, Math.min(100, (value / max) * 100));
+  return (
+    <div style={{ width:"100%", height:4, background:C.border, borderRadius:99, overflow:"hidden" }}>
+      <div style={{ width:`${pct}%`, height:"100%", background:color, borderRadius:99, transition:"width .3s" }}/>
+    </div>
+  );
+}
+
+// ─── Status pill (loading / ok / error / badTicker) ──────────────────────────
+export function StatusPill({ id, status, errMsg }) {
+  const [gone, setGone] = useState(false);
+  useEffect(() => {
+    setGone(false);
+    if (status === "ok") { const t = setTimeout(() => setGone(true), 5000); return () => clearTimeout(t); }
+  }, [status]);
+  if (gone) return null;
+  const cfg = {
+    ok:        { bg: C.greenLt, color: C.greenDk, bd: C.greenBd, icon: "✓" },
+    error:     { bg: C.redLt,   color: C.redDk,   bd: C.redBd,   icon: "✕" },
+    badTicker: { bg: "#FFFBEB", color: "#B45309", bd: "#FDE68A", icon: "?" },
+    loading:   { bg: "#fff",    color: C.muted,   bd: C.border,  icon: null },
+  };
+  const c = cfg[status] || cfg.loading;
+  return (
+    <span title={errMsg} style={{
+      display:"inline-flex", alignItems:"center", gap:5, padding:"3px 9px",
+      borderRadius:999, fontSize:11, fontWeight:600,
+      background:c.bg, color:c.color, border:`1px solid ${c.bd}`,
+      fontFamily:"var(--tf-font-sans)", fontVariantNumeric:"tabular-nums",
+    }}>
+      {status === "loading"
+        ? <Spinner size={8} color={c.color}/>
+        : <span style={{width:5,height:5,borderRadius:"50%",background:c.color,display:"inline-block"}}/>}
+      {id} {c.icon}
+    </span>
+  );
+}
+
+// ─── Error boundary ──────────────────────────────────────────────────────────
+import { Component } from "react";
+export class ErrorBoundary extends Component {
+  constructor(props) { super(props); this.state = { error: null }; }
+  static getDerivedStateFromError(error) { return { error }; }
+  componentDidCatch(error, info) { console.error("Boundary caught:", error, info); }
+  reset = () => this.setState({ error: null });
+  render() {
+    if (this.state.error) {
+      return (
+        <div style={{ padding:30, textAlign:"center", color:C.muted, fontSize:13 }}>
+          <div style={{ fontSize:30, marginBottom:10 }}>⚠</div>
+          <div style={{ fontWeight:700, marginBottom:6, color:C.red }}>Something broke in this section</div>
+          <div style={{ fontFamily:"monospace", fontSize:11, marginBottom:14 }}>{this.state.error.message}</div>
+          <Button kind="primary" size="sm" onClick={this.reset}>Try again</Button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { fetchHistory } from "../lib/api";
+import {
+  alignSeriesInner, computeMetrics, buildCorrelationMatrix,
+  buildDisplayChart, buildAnnualReturns, buildMonthlyHeatmap,
+  buildDrawdownChart, buildRollingReturns, analyzeDrawdowns,
+  buildDistribution, buildScatterData,
+} from "../lib/compute";
+import { runSimulationInWorker } from "../lib/worker-compute";
+import { PERIODS, INITIAL_VALUE } from "../lib/tokens";
+
+export function useBacktest({ portfolios, period, benchmark, pfColors, rollingWin, corrPfIdx }) {
+  const [statuses,         setStatuses]         = useState({});
+  const [statusMsgs,       setStatusMsgs]       = useState({});
+  const [priceCache,       setPriceCache]       = useState({});
+  const [simResults,       setSimResults]       = useState([]);
+  const [benchSim,         setBenchSim]         = useState(null);
+  const [coverageWarnings, setCoverageWarnings] = useState(null);
+  const [busy,             setBusy]             = useState(false);
+  const [loadCount,        setLoadCount]        = useState({ total: 0, done: 0 });
+  const [lastDates,        setLastDates]        = useState({});
+
+  const pfNames = useMemo(() => portfolios.map(p => p.name), [portfolios]);
+
+  const recompute = useCallback(async (pfs, pd, cache, bm) => {
+    try {
+      const result = await runSimulationInWorker({
+        portfolios: pfs.map(pf => ({
+          name: pf.name, rebalance: pf.rebalance, contribution: pf.contribution,
+          holdings: pf.holdings.map(h => ({ sym: h.sym, weight: h.weight })),
+        })),
+        priceCache: cache,
+        period: pd,
+        benchmark: bm,
+        initialValue: INITIAL_VALUE,
+      });
+      setSimResults(result.results);
+      setBenchSim(result.benchSim);
+      setCoverageWarnings(result.coverageWarnings);
+    } catch (e) { console.error("Worker error:", e); }
+  }, []);
+
+  const load = useCallback(async (pfs, pd, cache, bm) => {
+    setBusy(true);
+    const cfg = PERIODS.find(p => p.label === pd) ?? PERIODS[3];
+    const allIds = [...new Set([...pfs.flatMap(pf => pf.holdings.map(h => h.sym)), bm])].filter(Boolean);
+    const missing = allIds.filter(id => !cache[`${id}_${pd}`]);
+
+    setLoadCount({ total: missing.length, done: 0 });
+    if (missing.length) {
+      setStatuses(s => { const n = { ...s }; missing.forEach(id => { n[id] = "loading"; }); return n; });
+    }
+
+    const nc = { ...cache };
+    await Promise.allSettled(missing.map(async id => {
+      try {
+        const res = await fetchHistory(id, cfg.days, cfg.interval);
+        nc[`${id}_${pd}`] = res.data || res;
+        if (res.lastDate) setLastDates(d => ({ ...d, [id]: res.lastDate }));
+        setStatuses(s => ({ ...s, [id]: "ok" }));
+        setLoadCount(c => ({ ...c, done: c.done + 1 }));
+      } catch (e) {
+        nc[`${id}_${pd}`] = null;
+        setStatuses(s => ({ ...s, [id]: e.isInvalidTicker ? "badTicker" : "error" }));
+        setStatusMsgs(s => ({ ...s, [id]: e.message }));
+        setLoadCount(c => ({ ...c, done: c.done + 1 }));
+      }
+    }));
+
+    setPriceCache(nc);
+    await recompute(pfs, pd, nc, bm);
+    setBusy(false);
+  }, [recompute]);
+
+  useEffect(() => { load(portfolios, period, priceCache, benchmark); /* eslint-disable-next-line */ }, [period, benchmark]);
+
+  const prevSig = useRef("");
+  useEffect(() => {
+    const tSig = [...new Set([...portfolios.flatMap(p => p.holdings.map(h => h.sym)), benchmark])].sort().join(",");
+    const wSig = portfolios.map(p => p.holdings.map(h => `${h.sym}:${h.weight}`).join(",") + p.rebalance + p.contribution).join("|");
+    const sig = tSig + "|" + wSig;
+    if (sig === prevSig.current) return;
+    const tChanged = tSig !== prevSig.current.split("|")[0];
+    prevSig.current = sig;
+    if (tChanged) load(portfolios, period, priceCache, benchmark);
+    else recompute(portfolios, period, priceCache, benchmark);
+    /* eslint-disable-next-line */
+  }, [portfolios]);
+
+  const allMetrics = useMemo(() => {
+    const cfg = PERIODS.find(p => p.label === period) ?? PERIODS[3];
+    return simResults.map(sim => computeMetrics(sim, benchSim, cfg.interval));
+  }, [simResults, benchSim, period]);
+
+  const displayChart  = useMemo(() => buildDisplayChart(simResults, pfNames, benchSim), [simResults, pfNames, benchSim]);
+  const drawdownChart = useMemo(() => buildDrawdownChart(simResults, pfNames), [simResults, pfNames]);
+  const annualRet     = useMemo(() => buildAnnualReturns(simResults, pfNames), [simResults, pfNames]);
+  const rollingRet    = useMemo(() => buildRollingReturns(simResults, pfNames, rollingWin), [simResults, pfNames, rollingWin]);
+  const distData      = useMemo(() => buildDistribution(simResults, pfNames), [simResults, pfNames]);
+  const scatterData   = useMemo(() => buildScatterData(allMetrics, pfNames, pfColors), [allMetrics, pfNames, pfColors]);
+  const ddAnalysis    = useMemo(() => simResults.map(sim => analyzeDrawdowns(sim, -5)), [simResults]);
+
+  const tickerPerfs = useMemo(() => {
+    const out = {};
+    portfolios.forEach(pf => pf.holdings.forEach(h => {
+      if (out[h.sym] != null) return;
+      const s = priceCache[`${h.sym}_${period}`];
+      if (s?.length > 1) out[h.sym] = +((s[s.length-1].close - s[0].close) / s[0].close * 100).toFixed(2);
+    }));
+    return out;
+  }, [priceCache, period, portfolios]);
+
+  const corrMatrix = useMemo(() => {
+    const pf = portfolios[corrPfIdx] || portfolios[0];
+    if (!pf) return null;
+    const inner = {};
+    pf.holdings.forEach(h => { if (priceCache[`${h.sym}_${period}`]) inner[h.sym] = priceCache[`${h.sym}_${period}`]; });
+    const al = alignSeriesInner(inner);
+    return Object.keys(al).length >= 2 ? buildCorrelationMatrix(al) : null;
+  }, [portfolios, corrPfIdx, priceCache, period]);
+
+  const heatmapData = useMemo(() => buildMonthlyHeatmap(simResults[corrPfIdx] || []), [simResults, corrPfIdx]);
+
+  const latestDate = useMemo(() => {
+    const dates = Object.values(lastDates).filter(Boolean);
+    return dates.length ? dates.sort().pop() : null;
+  }, [lastDates]);
+
+  return {
+    statuses, statusMsgs, priceCache,
+    simResults, benchSim, allMetrics,
+    coverageWarnings, busy, loadCount, latestDate,
+    displayChart, drawdownChart, annualRet,
+    rollingRet, distData, scatterData, ddAnalysis,
+    tickerPerfs, corrMatrix, heatmapData,
+  };
+}
+
+import React from "react";
+import ReactDOM from "react-dom/client";
+import App from "./App";
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<React.StrictMode><App /></React.StrictMode>);
+
+// ─── Throttled fetch queue ────────────────────────────────────────────────────
+class Limiter {
+  constructor(max = 4) { this.max = max; this.running = 0; this.queue = []; }
+  async run(fn) {
+    if (this.running >= this.max) await new Promise(r => this.queue.push(r));
+    this.running++;
+    try { return await fn(); }
+    finally { this.running--; const n = this.queue.shift(); if (n) n(); }
+  }
+}
+const limiter = new Limiter(4);
+
+export async function fetchHistory(ticker, days, interval) {
+  return limiter.run(async () => {
+    const res = await fetch(`/api/history?ticker=${encodeURIComponent(ticker)}&days=${days}&interval=${interval}`);
+    const json = await res.json();
+    if (!res.ok) {
+      const e = new Error(json.error || `HTTP ${res.status}`);
+      e.errorType = json.errorType;
+      e.isInvalidTicker = json.errorType === "INVALID_TICKER";
+      throw e;
+    }
+    return json;
+  });
+}
+
+// ─── URL state encode/decode ─────────────────────────────────────────────────
+export function encodeState(state) {
+  try { return btoa(JSON.stringify(state)); } catch { return ""; }
+}
+export function decodeState(hash) {
+  try { return JSON.parse(atob(hash)); } catch { return null; }
+}
+
+// ─── CSV export ──────────────────────────────────────────────────────────────
+export function exportCSV(displayChart, simResults, portfolios, pfNames, filename = "backtest.csv") {
+  if (!displayChart?.length) return;
+  const headers = ["Date"];
+  pfNames.forEach(n => headers.push(`${n} (%)`, `${n} ($)`, `${n} invested ($)`));
+  headers.push("Benchmark (%)");
+  const rows = [headers.join(",")];
+  displayChart.forEach(r => {
+    const row = [r._iso || r.date];
+    pfNames.forEach(n => {
+      row.push(r[n]?.toFixed(3) ?? "");
+      row.push(r[`${n}_val`]?.toFixed(2) ?? "");
+      row.push(r[`${n}_dep`]?.toFixed(2) ?? "");
+    });
+    row.push(r._bench?.toFixed(3) ?? "");
+    rows.push(row.join(","));
+  });
+  const blob = new Blob([rows.join("\n")], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  Object.assign(document.createElement("a"), { href: url, download: filename }).click();
+  URL.revokeObjectURL(url);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  Pure computation layer - no React, no DOM
+// ═══════════════════════════════════════════════════════════════════════════
+
+export function alignSeriesOuter(seriesMap) {
+  const ids = Object.keys(seriesMap).filter(id => seriesMap[id]?.length > 1);
+  if (!ids.length) return { ids: [], dates: [], closes: {}, coverageWarning: null };
+  const allDates = new Set();
+  const maps = {};
+  ids.forEach(id => {
+    maps[id] = {};
+    seriesMap[id].forEach(p => { maps[id][p.date] = p.close; allDates.add(p.date); });
+  });
+  const dates = [...allDates].sort();
+  const cw = {};
+  ids.forEach(id => {
+    const cov = dates.filter(d => maps[id][d] != null).length;
+    const pct = Math.round(cov / dates.length * 100);
+    if (pct < 80) cw[id] = { pct, firstDate: seriesMap[id][0]?.date, lastDate: seriesMap[id][seriesMap[id].length-1]?.date };
+  });
+  const closes = {};
+  ids.forEach(id => { closes[id] = dates.map(d => maps[id][d] ?? null); });
+  return { ids, dates, closes, coverageWarning: Object.keys(cw).length ? cw : null };
+}
+
+export function alignSeriesInner(seriesMap) {
+  const ids = Object.keys(seriesMap).filter(id => seriesMap[id]?.length > 1);
+  if (!ids.length) return {};
+  const maps = {};
+  ids.forEach(id => { maps[id] = {}; seriesMap[id].forEach(p => { maps[id][p.date] = p.close; }); });
+  const sets = ids.map(id => new Set(Object.keys(maps[id])));
+  const common = [...sets[0]].filter(d => sets.every(s => s.has(d))).sort();
+  if (common.length < 2) return {};
+  const out = {};
+  ids.forEach(id => { out[id] = common.map(d => ({ date: d, close: maps[id][d] })); });
+  return out;
+}
+
+export function simulatePortfolio(aligned, weights, rebalance, monthlyContribution, initialValue = 10000) {
+  const { ids, dates, closes } = aligned;
+  if (!ids.length || !dates.length) return [];
+  const totalW = ids.reduce((s, id) => s + (weights[id] ?? 0), 0);
+  if (totalW === 0) return [];
+  const w = {};
+  ids.forEach(id => { w[id] = (weights[id] ?? 0) / totalW; });
+
+  let startIdx = 0;
+  while (startIdx < dates.length && ids.some(id => closes[id][startIdx] == null)) startIdx++;
+  if (startIdx >= dates.length - 1) return [];
+
+  let shares = {};
+  ids.forEach(id => { shares[id] = (initialValue * w[id]) / closes[id][startIdx]; });
+
+  let lastRebalDate = new Date(dates[startIdx] + "T00:00:00Z");
+  let peakValue = initialValue;
+  let totalDeposited = initialValue;
+
+  const needsRebal = (cd, ld) => {
+    if (rebalance === "Never" || rebalance === "Bands 5%") return false;
+    const cur = new Date(cd + "T00:00:00Z");
+    const md = (cur.getFullYear() - ld.getFullYear()) * 12 + (cur.getMonth() - ld.getMonth());
+    if (rebalance === "Monthly")    return md >= 1;
+    if (rebalance === "Quarterly")  return md >= 3;
+    if (rebalance === "Annual")     return md >= 12;
+    return false;
+  };
+  const isNewMonth = (d, p) => p && d.slice(0,7) !== p.slice(0,7);
+
+  const results = [];
+  for (let i = startIdx; i < dates.length; i++) {
+    const date = dates[i];
+    const prices = {};
+    ids.forEach(id => {
+      const p = closes[id][i];
+      if (p == null) {
+        let j = i - 1;
+        while (j >= startIdx && closes[id][j] == null) j--;
+        prices[id] = closes[id][j] ?? 1;
+      } else prices[id] = p;
+    });
+
+    let totalValue = ids.reduce((s, id) => s + shares[id] * prices[id], 0);
+
+    if (i > startIdx && rebalance === "Bands 5%") {
+      const drifted = ids.some(id => Math.abs((shares[id] * prices[id]) / totalValue - w[id]) > 0.05);
+      if (drifted) {
+        ids.forEach(id => { shares[id] = (w[id] * totalValue) / prices[id]; });
+        lastRebalDate = new Date(date + "T00:00:00Z");
+      }
+    } else if (i > startIdx && needsRebal(date, lastRebalDate)) {
+      ids.forEach(id => { shares[id] = (totalValue * w[id]) / prices[id]; });
+      lastRebalDate = new Date(date + "T00:00:00Z");
+    }
+
+    const prev = i > startIdx ? dates[i-1] : null;
+    if (i > startIdx && monthlyContribution !== 0 && isNewMonth(date, prev)) {
+      totalValue += monthlyContribution;
+      totalDeposited += Math.max(0, monthlyContribution);
+      ids.forEach(id => { shares[id] += (monthlyContribution * w[id]) / prices[id]; });
+    }
+    totalValue = ids.reduce((s, id) => s + shares[id] * prices[id], 0);
+    peakValue = Math.max(peakValue, totalValue);
+
+    results.push({
+      date,
+      value:     +totalValue.toFixed(2),
+      deposited: +totalDeposited.toFixed(2),
+      drawdown:  +(((totalValue - peakValue) / peakValue) * 100).toFixed(3),
+      pct:       +(((totalValue - initialValue) / initialValue) * 100).toFixed(3),
+    });
+  }
+  return results;
+}
+
+export function buildDisplayChart(simResults, pfNames, benchSim) {
+  if (!simResults.length || !simResults[0].length) return [];
+  return simResults[0].map((row, i) => {
+    const out = { date: row.date, _iso: row.date };
+    simResults.forEach((sim, pi) => {
+      out[pfNames[pi]]          = sim[i]?.pct ?? null;
+      out[`${pfNames[pi]}_val`] = sim[i]?.value ?? null;
+      out[`${pfNames[pi]}_dep`] = sim[i]?.deposited ?? null;
+    });
+    if (benchSim) out._bench = benchSim[i]?.pct ?? null;
+    return out;
+  });
+}
+
+export function buildAnnualReturns(simResults, pfNames) {
+  if (!simResults.length) return [];
+  const byYear = {};
+  simResults.forEach((sim, pi) => {
+    const name = pfNames[pi];
+    const yearMap = {};
+    sim.forEach(r => {
+      const y = r.date.slice(0, 4);
+      if (!yearMap[y]) yearMap[y] = { first: r.value, last: r.value };
+      yearMap[y].last = r.value;
+    });
+    Object.entries(yearMap).forEach(([y, { first, last }]) => {
+      if (!byYear[y]) byYear[y] = {};
+      byYear[y][name] = +(((last - first) / first) * 100).toFixed(2);
+    });
+  });
+  return Object.entries(byYear).sort(([a], [b]) => a.localeCompare(b))
+    .map(([year, vals]) => ({ year, ...vals }));
+}
+
+export function buildMonthlyHeatmap(sim) {
+  if (!sim?.length) return [];
+  const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+  const byYM = {};
+  sim.forEach(r => {
+    const y = r.date.slice(0, 4);
+    const m = parseInt(r.date.slice(5, 7)) - 1;
+    if (!byYM[y]) byYM[y] = {};
+    if (!byYM[y][m]) byYM[y][m] = { first: r.value, last: r.value };
+    byYM[y][m].last = r.value;
+  });
+  return Object.entries(byYM).sort(([a], [b]) => b.localeCompare(a)).map(([year, months]) => {
+    const row = { year };
+    MONTHS.forEach((name, mi) => {
+      const d = months[mi];
+      row[name] = d ? +(((d.last - d.first) / d.first) * 100).toFixed(2) : null;
+    });
+    return row;
+  });
+}
+
+export function buildDrawdownChart(simResults, pfNames) {
+  if (!simResults[0]?.length) return [];
+  return simResults[0].map((row, i) => {
+    const out = { date: row.date };
+    simResults.forEach((sim, pi) => { out[pfNames[pi]] = sim[i]?.drawdown ?? null; });
+    return out;
+  });
+}
+
+export function analyzeDrawdowns(sim, threshold = -5) {
+  if (!sim?.length) return [];
+  const periods = [];
+  let inDD = false, ddStart = null, ddPeak = 0;
+  sim.forEach((r, i) => {
+    const dd = r.drawdown;
+    if (!inDD && dd < threshold) { inDD = true; ddStart = i; ddPeak = dd; }
+    else if (inDD) {
+      if (dd < ddPeak) ddPeak = dd;
+      if (dd >= -0.1) {
+        periods.push({ start: sim[ddStart].date, end: r.date, maxDD: +ddPeak.toFixed(2), duration: i - ddStart });
+        inDD = false; ddStart = null; ddPeak = 0;
+      }
+    }
+  });
+  if (inDD && ddStart != null) {
+    periods.push({ start: sim[ddStart].date, end: null, maxDD: +ddPeak.toFixed(2), duration: sim.length - 1 - ddStart });
+  }
+  return periods.sort((a, b) => a.maxDD - b.maxDD).slice(0, 10);
+}
+
+export function buildRollingReturns(simResults, pfNames, windowYears) {
+  if (!simResults[0]?.length) return [];
+  const sim0 = simResults[0];
+  const n = sim0.length;
+  const getStartIdx = (i) => {
+    const target = new Date(sim0[i].date + "T00:00:00Z");
+    target.setUTCFullYear(target.getUTCFullYear() - windowYears);
+    const targetISO = target.toISOString().slice(0, 10);
+    let lo = 0, hi = i;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (sim0[mid].date < targetISO) lo = mid + 1; else hi = mid;
+    }
+    return lo;
+  };
+  const result = [];
+  for (let i = 1; i < n; i++) {
+    const startIdx = getStartIdx(i);
+    if (startIdx === i) continue;
+    const row = { date: sim0[i].date };
+    let valid = false;
+    simResults.forEach((sim, pi) => {
+      const sv = sim[startIdx]?.value, ev = sim[i]?.value;
+      if (!sv || !ev) { row[pfNames[pi]] = null; return; }
+      row[pfNames[pi]] = +((Math.pow(ev / sv, 1 / windowYears) - 1) * 100).toFixed(2);
+      valid = true;
+    });
+    if (valid) result.push(row);
+  }
+  return result;
+}
+
+export function buildDistribution(simResults, pfNames, targetBins = 18) {
+  if (!simResults[0]?.length) return [];
+  const allReturns = simResults.map(sim => {
+    const pct = sim.map(r => r.pct);
+    return pct.slice(1).map((v, i) => v - pct[i]);
+  });
+  const allVals = allReturns.flat().filter(v => isFinite(v));
+  if (!allVals.length) return [];
+  const sorted = [...allVals].sort((a, b) => a - b);
+  const lo = sorted[Math.floor(sorted.length * 0.01)];
+  const hi = sorted[Math.floor(sorted.length * 0.99)];
+  const range = hi - lo;
+  const step = range / targetBins;
+  if (step === 0) return [];
+  const result = [];
+  for (let b = 0; b < targetBins; b++) {
+    const binLo = +(lo + b * step).toFixed(2);
+    const binHi = b === targetBins - 1 ? Infinity : +(lo + (b + 1) * step).toFixed(2);
+    const row = { range: `${binLo >= 0 ? "+" : ""}${binLo.toFixed(1)}%`, lo: binLo,
+      hi: binHi === Infinity ? +(lo + (b + 1) * step).toFixed(2) : binHi };
+    allReturns.forEach((rets, pi) => {
+      row[pfNames[pi]] = rets.filter(v => v >= binLo && v < binHi).length;
+    });
+    result.push(row);
+  }
+  return result;
+}
+
+export function buildScatterData(allMetrics, pfNames, pfColors) {
+  return allMetrics.map((m, i) => ({
+    name:   pfNames[i],
+    color:  pfColors[i],
+    cagr:   m?.cagr ? parseFloat(m.cagr) : null,
+    vol:    m?.volatility ? parseFloat(m.volatility) : null,
+    sharpe: m?.sharpe !== "—" ? parseFloat(m.sharpe) : null,
+  })).filter(p => p.cagr != null && p.vol != null);
+}
+
+export function computeMetrics(sim, benchSim, intervalLabel) {
+  if (!sim?.length || sim.length < 3) return null;
+  const n = sim.length;
+  const startD = new Date(sim[0].date + "T00:00:00Z");
+  const endD = new Date(sim[n - 1].date + "T00:00:00Z");
+  const years = Math.max((endD - startD) / (365.25 * 86400000), 1 / 12);
+  const values = sim.map(r => r.value);
+  const pcts = sim.map(r => r.pct);
+  const deposited = sim[n - 1].deposited;
+  const totalReturn = pcts[n - 1];
+  const showCAGR = years >= 0.25;
+  const cagr = showCAGR ? (Math.pow(values[n - 1] / values[0], 1 / years) - 1) * 100 : null;
+  const trueProfit = values[n - 1] - deposited;
+  const trueReturn = deposited > 0 ? (trueProfit / deposited) * 100 : null;
+  const periodsPerYear = n / years;
+  const diffs = pcts.slice(1).map((v, i) => v - pcts[i]);
+  const mean = diffs.reduce((s, v) => s + v, 0) / diffs.length;
+  const variance = diffs.reduce((s, v) => s + (v - mean) ** 2, 0) / diffs.length;
+  const stdDev = Math.sqrt(variance);
+  const annualVol = stdDev * Math.sqrt(periodsPerYear);
+  const sharpe = annualVol > 0 && cagr != null ? (cagr / annualVol).toFixed(2) : "—";
+  const downs = diffs.filter(v => v < 0);
+  const downsideV = downs.length ? Math.sqrt(downs.reduce((s, v) => s + v * v, 0) / downs.length) * Math.sqrt(periodsPerYear) : 0;
+  const sortino = downsideV > 0 && cagr != null ? (cagr / downsideV).toFixed(2) : "—";
+  let maxDD = 0, peak = -Infinity;
+  values.forEach(v => { if (v > peak) peak = v; maxDD = Math.max(maxDD, (peak - v) / peak * 100); });
+  const calmar = maxDD > 0 && cagr != null ? (cagr / maxDD).toFixed(2) : "—";
+  let beta = "—", alpha = "—", correlation = "—";
+  if (benchSim?.length === n) {
+    const bp = benchSim.map(r => r.pct);
+    const bd = bp.slice(1).map((v, i) => v - bp[i]);
+    const bm = bd.reduce((s, v) => s + v, 0) / bd.length;
+    const len = Math.min(diffs.length, bd.length);
+    const cov = diffs.slice(0, len).reduce((s, v, i) => s + (v - mean) * (bd[i] - bm), 0) / len;
+    const bVar = bd.reduce((s, v) => s + (v - bm) ** 2, 0) / bd.length;
+    const bVol = Math.sqrt(bVar);
+    beta = bVar > 0 ? (cov / bVar).toFixed(2) : "—";
+    const bFinal = benchSim[benchSim.length - 1].value;
+    const bStart = benchSim[0].value;
+    const bCAGR = (Math.pow(bFinal / bStart, 1 / years) - 1) * 100;
+    alpha = bVar > 0 && cagr != null ? (cagr - parseFloat(beta) * bCAGR).toFixed(2) : "—";
+    correlation = (bVol > 0 && stdDev > 0) ? (cov / (stdDev * bVol)).toFixed(2) : "—";
+  }
+  const periodBase = intervalLabel === "1d" ? "d" : intervalLabel === "1wk" ? "wk" : "mo";
+  return {
+    totalReturn:  totalReturn.toFixed(2),
+    finalValue:   values[n - 1].toFixed(0),
+    deposited:    deposited.toFixed(0),
+    trueProfit:   trueProfit.toFixed(0),
+    trueReturn:   trueReturn?.toFixed(2) ?? null,
+    cagr:         cagr?.toFixed(2) ?? null,
+    sharpe, sortino, calmar,
+    maxDD:        maxDD.toFixed(2),
+    volatility:   annualVol.toFixed(2),
+    best:         Math.max(...diffs).toFixed(2),
+    worst:        Math.min(...diffs).toFixed(2),
+    beta, alpha, correlation,
+    winRate:      ((diffs.filter(v => v > 0).length / diffs.length) * 100).toFixed(1),
+    winRateBase:  periodBase,
+    years:        years.toFixed(1),
+  };
+}
+
+export function buildCorrelationMatrix(innerAligned) {
+  const ids = Object.keys(innerAligned);
+  if (ids.length < 2) return null;
+  const returns = {};
+  ids.forEach(id => {
+    const closes = innerAligned[id].map(p => p.close);
+    returns[id] = closes.slice(1).map((v, i) => (v - closes[i]) / closes[i]);
+  });
+  const matrix = {};
+  ids.forEach(a => {
+    matrix[a] = {};
+    ids.forEach(b => {
+      const ra = returns[a], rb = returns[b];
+      const len = Math.min(ra.length, rb.length);
+      const ma = ra.slice(0, len).reduce((s, v) => s + v, 0) / len;
+      const mb = rb.slice(0, len).reduce((s, v) => s + v, 0) / len;
+      const cov = ra.slice(0, len).reduce((s, v, i) => s + (v - ma) * (rb[i] - mb), 0) / len;
+      const va = ra.slice(0, len).reduce((s, v) => s + (v - ma) ** 2, 0) / len;
+      const vb = rb.slice(0, len).reduce((s, v) => s + (v - mb) ** 2, 0) / len;
+      matrix[a][b] = va > 0 && vb > 0 ? +(cov / Math.sqrt(va * vb)).toFixed(3) : (a === b ? 1 : 0);
+    });
+  });
+  return { ids, matrix };
+}
+
+export function buildAssetChart(holdings, priceCache, period) {
+  const inner = {};
+  holdings.forEach(h => {
+    const k = `${h.id || h.sym}_${period}`;
+    if (priceCache[k]) inner[h.id || h.sym] = priceCache[k];
+  });
+  const al = alignSeriesInner(inner);
+  const refId = Object.keys(al)[0];
+  if (!refId) return [];
+  const b0 = {};
+  Object.keys(al).forEach(id => { b0[id] = al[id][0].close; });
+  return al[refId].map((row, j) => {
+    const out = { date: row.date };
+    Object.keys(al).forEach(id => {
+      out[id] = +((al[id][j].close - b0[id]) / b0[id] * 100).toFixed(2);
+    });
+    return out;
+  });
+}
+
+// ─── Formatting helpers ──────────────────────────────────────────────────────
+export function fmtDate(iso) {
+  return new Date(iso + "T00:00:00Z").toLocaleDateString("en-US", {
+    day:"numeric", month:"short", year:"2-digit", timeZone:"UTC",
+  });
+}
+
+export function fmtMonthYear(iso) {
+  return new Date(iso + "T00:00:00Z").toLocaleDateString("en-US", {
+    month:"short", year:"numeric", timeZone:"UTC",
+  });
+}
+
+export function fmtCurrency(v, decimals = 0) {
+  if (v == null || !isFinite(v)) return "—";
+  return parseFloat(v).toLocaleString("en-US", {
+    style:"currency", currency:"USD",
+    minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+  });
+}
+
+export function fmtNumber(v, decimals = 0) {
+  if (v == null || !isFinite(v)) return "—";
+  return parseFloat(v).toLocaleString("en-US", {
+    minimumFractionDigits: decimals, maximumFractionDigits: decimals,
+  });
+}
+
+export function fmtPct(v, decimals = 2, signed = true) {
+  if (v == null || !isFinite(v)) return "—";
+  const n = parseFloat(v);
+  return `${signed && n >= 0 ? "+" : ""}${n.toFixed(decimals)}%`;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  FOLIOTEST DESIGN SYSTEM — tokens, colors, constants
+// ═══════════════════════════════════════════════════════════════════════════
+
+// ─── Palette (from Claude Design export) ─────────────────────────────────────
+export const C = {
+  // Surfaces
+  bg:       "#FFFFFF",
+  bgAlt:    "#FAFAFA",
+  bgHover:  "#F5F5F5",
+  surface:  "#FFFFFF",
+
+  // Borders
+  border:   "#EDEDED",
+  borderHv: "#E0E0E0",
+  borderMd: "#CFCFCF",
+
+  // Text
+  text:     "#0A0A0A",
+  text2:    "#404040",
+  sub:      "#525252",
+  muted:    "#737373",
+  faint:    "#A3A3A3",
+
+  // Brand & accents
+  indigo:   "#4F46E5",
+  indigoLt: "#EEF0FF",
+  indigoBd: "#E0E3FB",
+  indigo2:  "#6366F1",
+
+  // Performance
+  green:    "#059669",
+  greenDk:  "#047857",
+  greenLt:  "#ECFDF5",
+  greenBd:  "#A7F3D0",
+
+  red:      "#DC2626",
+  redDk:    "#B91C1C",
+  redLt:    "#FEF2F2",
+  redBd:    "#FECACA",
+
+  // Other
+  amber:    "#D97706",
+  amberLt:  "#FBBF24",
+  cyan:     "#0EA5E9",
+  emerald:  "#10B981",
+  violet:   "#8B5CF6",
+  slate:    "#374151",
+  gray:     "#6B7280",
+};
+
+// Asset-specific colors (from Foliotest)
+export const ASSET_COLORS = {
+  VTI:     "#4F46E5", QQQ:  "#0EA5E9", SPY:  "#0A0A0A", VXUS: "#10B981",
+  BND:     "#6B7280", TLT:  "#374151", GLD:  "#D97706", "BTC-USD": "#F59E0B",
+  "ETH-USD":"#7C3AED","SOL-USD":"#16A34A", VNQ:  "#8B5CF6",
+  AAPL:    "#111111", MSFT: "#0284C7", NVDA: "#16A34A", TSLA: "#DC2626",
+  GOOGL:   "#7C3AED", META: "#0EA5E9", AMZN: "#D97706", "BRK-B": "#0A0A0A",
+  JPM:     "#1D4ED8", V:    "#4F46E5", NFLX: "#DC2626",
+  "IWDA.AS":"#10B981","CW8.PA":"#7C3AED",ARKK: "#F59E0B", VBR:  "#6366F1",
+  SHY:     "#9CA3AF", TIP:  "#10B981", HYG:  "#D97706", BND2: "#6B7280",
+  DBC:     "#D97706", SLV:  "#9CA3AF", "BNB-USD":"#F0B90B", "XRP-USD":"#0EA5E9",
+};
+
+export const PF_COLORS = ["#4F46E5", "#0A0A0A", "#0EA5E9", "#059669"];
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+export const PERIODS = [
+  {label:"1M",  days:30,   interval:"1d"},
+  {label:"3M",  days:90,   interval:"1d"},
+  {label:"6M",  days:180,  interval:"1d"},
+  {label:"1Y",  days:365,  interval:"1wk"},
+  {label:"3Y",  days:1095, interval:"1mo"},
+  {label:"5Y",  days:1825, interval:"1mo"},
+  {label:"10Y", days:3650, interval:"1mo"},
+  {label:"Max", days:7300, interval:"1mo"},
+];
+
+export const REBALANCE = ["Monthly", "Quarterly", "Annual", "Bands 5%", "Never"];
+
+export const PRESETS = [
+  {
+    id: "long-term-etf", name: "Long-term ETF", tag: "Boring & solid",
+    desc: "Diversified equity + bonds. Set it and forget it.",
+    holdings: [
+      { sym:"VTI",  weight: 50 },
+      { sym:"VXUS", weight: 25 },
+      { sym:"BND",  weight: 25 },
+    ],
+    rebalance: "Quarterly",
+  },
+  {
+    id: "aggressive", name: "Aggressive growth", tag: "High risk · high reward",
+    desc: "Tilted toward tech and growth. Expect volatility.",
+    holdings: [
+      { sym:"QQQ",  weight: 50 },
+      { sym:"VTI",  weight: 30 },
+      { sym:"BTC-USD", weight: 10 },
+      { sym:"NVDA", weight: 10 },
+    ],
+    rebalance: "Quarterly",
+  },
+  {
+    id: "all-weather", name: "All Weather", tag: "Designed for any climate",
+    desc: "Inspired by Ray Dalio. Balanced across regimes.",
+    holdings: [
+      { sym:"VTI", weight: 30 },
+      { sym:"TLT", weight: 40 },
+      { sym:"GLD", weight: 15 },
+      { sym:"BND", weight: 15 },
+    ],
+    rebalance: "Annual",
+  },
+  {
+    id: "sixty-forty", name: "60/40 Classic", tag: "Time-tested",
+    desc: "Decades-old benchmark. Equity ballast meets bond stability.",
+    holdings: [
+      { sym:"SPY", weight: 60 },
+      { sym:"BND", weight: 40 },
+    ],
+    rebalance: "Annual",
+  },
+  {
+    id: "faang", name: "FAANG+", tag: "Concentrated tech",
+    desc: "Pure mega-cap technology bet. Maximum upside, maximum drawdown.",
+    holdings: [
+      { sym:"AAPL", weight: 20 },
+      { sym:"MSFT", weight: 20 },
+      { sym:"GOOGL",weight: 20 },
+      { sym:"META", weight: 20 },
+      { sym:"AMZN", weight: 20 },
+    ],
+    rebalance: "Quarterly",
+  },
+  {
+    id: "crypto-core", name: "Crypto Core", tag: "Digital assets",
+    desc: "Bitcoin-dominant with ETH and SOL. Extreme volatility.",
+    holdings: [
+      { sym:"BTC-USD", weight: 60 },
+      { sym:"ETH-USD", weight: 30 },
+      { sym:"SOL-USD", weight: 10 },
+    ],
+    rebalance: "Quarterly",
+  },
+];
+
+export const ASSET_GROUPS = {
+  "Equities":   ["AAPL","MSFT","AMZN","NVDA","GOOGL","META","TSLA","BRK-B","JPM","V","NFLX"],
+  "ETFs":       ["SPY","QQQ","VTI","VXUS","IWDA.AS","CW8.PA","VNQ","ARKK","VBR"],
+  "Crypto":     ["BTC-USD","ETH-USD","SOL-USD","BNB-USD","XRP-USD"],
+  "Bonds & Gold": ["TLT","SHY","BND","GLD","SLV","TIP","HYG","DBC"],
+};
+
+export const ASSET_META = {
+  // Equities
+  AAPL:  { name: "Apple",          cls: "Equities" },
+  MSFT:  { name: "Microsoft",      cls: "Equities" },
+  AMZN:  { name: "Amazon",         cls: "Equities" },
+  NVDA:  { name: "NVIDIA",         cls: "Equities" },
+  GOOGL: { name: "Alphabet",       cls: "Equities" },
+  META:  { name: "Meta",           cls: "Equities" },
+  TSLA:  { name: "Tesla",          cls: "Equities" },
+  "BRK-B":{ name: "Berkshire B",   cls: "Equities" },
+  JPM:   { name: "JPMorgan",       cls: "Equities" },
+  V:     { name: "Visa",           cls: "Equities" },
+  NFLX:  { name: "Netflix",        cls: "Equities" },
+  // ETFs
+  VTI:   { name: "Total US stock", cls: "ETF" },
+  QQQ:   { name: "Nasdaq 100",     cls: "ETF" },
+  SPY:   { name: "S&P 500",        cls: "ETF" },
+  VXUS:  { name: "International",  cls: "ETF" },
+  "IWDA.AS": { name: "MSCI World", cls: "ETF" },
+  "CW8.PA":  { name: "MSCI World €", cls: "ETF" },
+  VNQ:   { name: "Real estate",    cls: "ETF" },
+  ARKK:  { name: "ARK Innovation", cls: "ETF" },
+  VBR:   { name: "Small-cap value",cls: "ETF" },
+  // Bonds
+  BND:   { name: "US bonds",       cls: "Bond" },
+  TLT:   { name: "20+yr Treasury", cls: "Bond" },
+  SHY:   { name: "1-3yr Treasury", cls: "Bond" },
+  TIP:   { name: "TIPS",           cls: "Bond" },
+  HYG:   { name: "High yield",     cls: "Bond" },
+  // Commodities
+  GLD:   { name: "Gold",           cls: "Commodity" },
+  SLV:   { name: "Silver",         cls: "Commodity" },
+  DBC:   { name: "Commodities",    cls: "Commodity" },
+  // Crypto
+  "BTC-USD": { name: "Bitcoin",    cls: "Crypto" },
+  "ETH-USD": { name: "Ethereum",   cls: "Crypto" },
+  "SOL-USD": { name: "Solana",     cls: "Crypto" },
+  "BNB-USD": { name: "BNB",        cls: "Crypto" },
+  "XRP-USD": { name: "XRP",        cls: "Crypto" },
+};
+
+export const INITIAL_VALUE = 10000;
+export const MONTHS_SHORT  = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+
+export const ROUTES = [
+  { id:"onboarding",  label:"New portfolio", icon:"plus-circle" },
+  { id:"builder",     label:"Builder",       icon:"layers" },
+  { id:"results",     label:"Results",       icon:"line-chart" },
+  { id:"compare",     label:"Compare",       icon:"bar-chart-2" },
+  { id:"correlation", label:"Correlation",   icon:"grid-3x3" },
+];
+
+// Web Worker — runs heavy computations off the main UI thread
+export const WORKER_SOURCE = `
+function alignSeriesOuter(seriesMap) {
+  const ids = Object.keys(seriesMap).filter(id => seriesMap[id]?.length > 1);
+  if (!ids.length) return { ids: [], dates: [], closes: {}, coverageWarning: null };
+  const allDates = new Set();
+  const maps = {};
+  ids.forEach(id => {
+    maps[id] = {};
+    seriesMap[id].forEach(p => { maps[id][p.date] = p.close; allDates.add(p.date); });
+  });
+  const dates = [...allDates].sort();
+  const cw = {};
+  ids.forEach(id => {
+    const cov = dates.filter(d => maps[id][d] != null).length;
+    const pct = Math.round(cov / dates.length * 100);
+    if (pct < 80) cw[id] = { pct, firstDate: seriesMap[id][0]?.date, lastDate: seriesMap[id][seriesMap[id].length-1]?.date };
+  });
+  const closes = {};
+  ids.forEach(id => { closes[id] = dates.map(d => maps[id][d] ?? null); });
+  return { ids, dates, closes, coverageWarning: Object.keys(cw).length ? cw : null };
+}
+
+function simulatePortfolio(aligned, weights, rebalance, monthlyContribution, initialValue) {
+  const { ids, dates, closes } = aligned;
+  if (!ids.length || !dates.length) return [];
+  const totalW = ids.reduce((s, id) => s + (weights[id] ?? 0), 0);
+  if (totalW === 0) return [];
+  const w = {};
+  ids.forEach(id => { w[id] = (weights[id] ?? 0) / totalW; });
+  let startIdx = 0;
+  while (startIdx < dates.length && ids.some(id => closes[id][startIdx] == null)) startIdx++;
+  if (startIdx >= dates.length - 1) return [];
+  let shares = {};
+  ids.forEach(id => { shares[id] = (initialValue * w[id]) / closes[id][startIdx]; });
+  let lastRebalDate = new Date(dates[startIdx] + "T00:00:00Z");
+  let peakValue = initialValue;
+  let totalDeposited = initialValue;
+  const needsRebal = (cd, ld) => {
+    if (rebalance === "Never" || rebalance === "Bands 5%") return false;
+    const cur = new Date(cd + "T00:00:00Z");
+    const md = (cur.getFullYear() - ld.getFullYear()) * 12 + (cur.getMonth() - ld.getMonth());
+    if (rebalance === "Monthly") return md >= 1;
+    if (rebalance === "Quarterly") return md >= 3;
+    if (rebalance === "Annual") return md >= 12;
+    return false;
+  };
+  const isNewMonth = (d, p) => p && d.slice(0,7) !== p.slice(0,7);
+  const results = [];
+  for (let i = startIdx; i < dates.length; i++) {
+    const date = dates[i];
+    const prices = {};
+    ids.forEach(id => {
+      const p = closes[id][i];
+      if (p == null) {
+        let j = i - 1;
+        while (j >= startIdx && closes[id][j] == null) j--;
+        prices[id] = closes[id][j] ?? 1;
+      } else prices[id] = p;
+    });
+    let totalValue = ids.reduce((s, id) => s + shares[id] * prices[id], 0);
+    if (i > startIdx && rebalance === "Bands 5%") {
+      const drifted = ids.some(id => Math.abs((shares[id] * prices[id]) / totalValue - w[id]) > 0.05);
+      if (drifted) {
+        ids.forEach(id => { shares[id] = (w[id] * totalValue) / prices[id]; });
+        lastRebalDate = new Date(date + "T00:00:00Z");
+      }
+    } else if (i > startIdx && needsRebal(date, lastRebalDate)) {
+      ids.forEach(id => { shares[id] = (totalValue * w[id]) / prices[id]; });
+      lastRebalDate = new Date(date + "T00:00:00Z");
+    }
+    const prev = i > startIdx ? dates[i-1] : null;
+    if (i > startIdx && monthlyContribution !== 0 && isNewMonth(date, prev)) {
+      totalValue += monthlyContribution;
+      totalDeposited += Math.max(0, monthlyContribution);
+      ids.forEach(id => { shares[id] += (monthlyContribution * w[id]) / prices[id]; });
+    }
+    totalValue = ids.reduce((s, id) => s + shares[id] * prices[id], 0);
+    peakValue = Math.max(peakValue, totalValue);
+    results.push({
+      date,
+      value: +totalValue.toFixed(2),
+      deposited: +totalDeposited.toFixed(2),
+      drawdown: +(((totalValue - peakValue) / peakValue) * 100).toFixed(3),
+      pct: +(((totalValue - initialValue) / initialValue) * 100).toFixed(3),
+    });
+  }
+  return results;
+}
+
+self.onmessage = function(e) {
+  const { type, payload } = e.data;
+  if (type === "simulate") {
+    const { portfolios, priceCache, period, benchmark, initialValue } = payload;
+    const results = [];
+    let coverageWarnings = null;
+    portfolios.forEach(pf => {
+      const rawMap = {};
+      pf.holdings.forEach(h => {
+        const k = h.sym + "_" + period;
+        if (priceCache[k]) rawMap[h.sym] = priceCache[k];
+      });
+      const al = alignSeriesOuter(rawMap);
+      if (al.coverageWarning) coverageWarnings = { ...(coverageWarnings || {}), ...al.coverageWarning };
+      if (!al.ids.length) { results.push([]); return; }
+      const w = {};
+      pf.holdings.forEach(h => { w[h.sym] = h.weight; });
+      results.push(simulatePortfolio(al, w, pf.rebalance, pf.contribution, initialValue));
+    });
+    let benchSim = null;
+    const bk = benchmark + "_" + period;
+    if (priceCache[bk]) {
+      const ba = alignSeriesOuter({ [benchmark]: priceCache[bk] });
+      if (ba.ids.length) benchSim = simulatePortfolio(ba, { [benchmark]: 100 }, "Never", 0, initialValue);
+    }
+    self.postMessage({ type: "simulateDone", results, benchSim, coverageWarnings });
+  }
+};
+`;
+
+let workerInstance = null;
+export function getWorker() {
+  if (!workerInstance) {
+    const blob = new Blob([WORKER_SOURCE], { type: "application/javascript" });
+    workerInstance = new Worker(URL.createObjectURL(blob));
+  }
+  return workerInstance;
+}
+
+export function runSimulationInWorker(payload) {
+  return new Promise((resolve, reject) => {
+    const w = getWorker();
+    const handler = (e) => {
+      if (e.data.type === "simulateDone") {
+        w.removeEventListener("message", handler);
+        resolve(e.data);
+      }
+    };
+    w.addEventListener("message", handler);
+    w.addEventListener("error", reject, { once: true });
+    w.postMessage({ type: "simulate", payload });
+  });
+}
